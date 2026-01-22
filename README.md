@@ -1,4 +1,4 @@
-
+ 
 # Bayesian Inference for an Inverse Heat Problem
 
 This repository contains a Python notebook that shows how Bayesian inference can be used to solve an inverse boundary value problem for the steady‑state heat equation (Laplace equation). The goal is to recover an unknown temperature boundary condition from noisy interior temperature measurements.
@@ -14,11 +14,10 @@ The project combines:
 
 ## Problem Description
 
-Consider a 2D unit square domain (\Omega = [0,1] \times [0,1]), governed by the Laplace equation:
+Consider a 2D unit square domain  
+Ω=[0,1]×[0,1], governed by the Laplace equation:
 
-$$
-\nabla^2 u = 0 \quad \text{in } \Omega
-$$
+∇²u = 0   in Ω
 
 Boundary conditions:
 
@@ -27,9 +26,9 @@ Boundary conditions:
 
 Observe noisy temperature measurements at a finite set of interior points:
 
-$$
-\nu_i = u(x_i, y_i) + \eta_i, \quad \eta_i \sim \mathcal{N}(0, \sigma^2)
-$$
+ν_i = u(x_i, y_i) + η_i
+η_i ~ N(0, σ²)
+
 
 The inverse problem is to infer the unknown boundary function (f(y)) from these interior observations.
 
@@ -41,41 +40,34 @@ The inverse problem is to infer the unknown boundary function (f(y)) from these 
 
 The unknown boundary condition is represented as a finite expansion of Gaussian RBFs:
 
-$$
-f(y) = \sum_{k=1}^K \alpha_k , \exp!\left( -\frac{(y - y_k)^2}{2\ell^2} \right)
-$$
+f(y) = Σ_{k=1}^K α_k · exp( - (y - y_k)² / (2ℓ²) )
 
 where:
 
-* (\alpha_k) are unknown coefficients
-* (y_k) are fixed RBF centers along the boundary
-* (\ell) is the RBF width
+* α_k are unknown coefficients
+* y_k are fixed RBF centers along the boundary
+* ℓ is the RBF width
 
 ### Prior
 
 A zero‑mean Gaussian prior is placed on the coefficients:
 
-$$
-\alpha \sim \mathcal{N}(0, \tau^2 I)
-$$
+α ~ N(0, τ² I)
+
 
 ### Likelihood
 
-Given predicted measurements (G(\alpha)), the likelihood is:
+Given predicted measurements G(α), the likelihood is:
 
-$$
-\nu \mid \alpha \sim \mathcal{N}(G(\alpha), \sigma^2 I)
-$$
+ν | α ~ N( G(α), σ² I )
 
 ### Posterior
 
 The log‑posterior (up to a constant) is:
 
-$$
-\log \pi(\alpha \mid \nu) = -\frac{|G(\alpha) - \nu|^2}{2\sigma^2}
-
-* \frac{|\alpha|^2}{2\tau^2}
-  $$
+log π(α | ν) =
+  - ||G(α) - ν||² / (2σ²)
+  - ||α||² / (2τ²)
 
 ---
 
@@ -90,9 +82,7 @@ The forward map consists of:
 
 This entire process defines a nonlinear map:
 
-$$
-\alpha ;\longmapsto; G(\alpha)
-$$
+α → G(α)
 
 ---
 
@@ -101,7 +91,7 @@ $$
 Posterior sampling is performed using a Metropolis–Hastings algorithm:
 
 * Proposal: Gaussian random walk
-* Initial state: (\alpha = 0)
+* Initial state: α= 0
 * Burn‑in: first third of samples discarded
 
 The sampler produces an ensemble of boundary realizations, from which posterior statistics are computed.
@@ -129,7 +119,7 @@ These diagnostics help assess convergence and sampling efficiency.
 
 ---
 
-## 📦 Dependencies
+## Dependencies
 
 The code relies on standard scientific Python libraries:
 
