@@ -1,0 +1,274 @@
+# BAYESIAN INFERENCE FOR AN INVERSE HEAT PROBLEM # # This notebook solves an inverse boundary value problem for the Laplace equation. # The unknown is a temperature boundary condition on the left side of the domain. # We infer this boundary from noisy interior temperature measurements using a # Bayesian approach (Gaussian prior + Gaussian likelihood + MCMC sampling). import numpy as np import matplotlib.pyplot as plt import scipy.sparse as sp import scipy.sparse.linalg as spla # Set nicer plotting defaults plt.rcParams.update({"figure.figsize": (5,4), "font.size": 11}) # Load measurement data and visualize measurement points 
+
+def load_data(path:str):
+    """
+    Load measurement data from the provided .npz file.
+    Returns:
+        - measurement coordinates (x_meas, y_meas)
+        - measured temperatures u_meas
+        - noise level sigma
+        - plotting grid (x_plot, y_plot)
+        - reference samples of the true boundary condition
+    """
+    data = np.load(path, allow_pickle=True)
+    return (
+        data["x_meas"], data["y_meas"], data["u_meas"], float(data["sigma"]),
+        data["x_plot"], data["y_plot"], data["f_true_y"], data["f_true_vals"]
+    )
+
+# Load data
+x_meas, y_meas, u_meas, sigma, x_grid, y_grid, f_true_y, f_true_vals = load_data("/content/measurements.npz") # Plot measurement locations colored by measured temperature
+plt.figure()
+sc = plt.scatter(x_meas, y_meas, c=u_meas, cmap="viridis")
+plt.colorbar(sc, label="Measured temperature")
+plt.xlabel("x")
+plt.ylabel("y")
+plt.title("Interior measurement locations")
+plt.axis("equal")
+plt.show()
+# Forward problem: solve Laplace equation with RBF boundary
+
+def solve_laplace_rbf(N, alpha, y_bc, rbf_width):
+    """
+    Solve the Laplace equation on an NxN interior grid.
+    The left boundary condition is represented using Gaussian RBFs.
+
+    Inputs:
+        N          : number of interior grid points per dimension
+        alpha      : RBF coefficients, unknown parameters
+        y_bc       : RBF center locations along the boundary
+        rbf_width  : width of Gaussian RBFs
+
+    Output:
+        U : (N+2)x(N+2) grid of the temperature solution including boundaries
+    """
+
+    alpha = np.asarray(alpha)
+    n = N * N  # number of interior unknowns
+
+    # Helper: convert 2D index (i,j) to 1D index
+    def idx(i, j): return i * N + j
+
+    # Construct left boundary condition from RBF expansion
+    y_vals = np.linspace(0, 1, N + 2)
+    left_bc = np.zeros_like(y_vals)
+    for k, yc in enumerate(y_bc):
+        left_bc += alpha[k] * np.exp(-0.5 * ((y_vals - yc) / rbf_width)**2)
+
+    # Build sparse matrix for finite-difference Laplacian
+    A = sp.lil_matrix((n, n))
+    b = np.zeros(n)
+
+    for i in range(N):
+        for j in range(N):
+            k = idx(i, j)
+            A[k, k] = -4  # center stencil
+
+            # Left neighbor
+            if i > 0:
+                A[k, idx(i-1, j)] = 1
+            else:
+                # Boundary contribution from left boundary
+                b[k] -= left_bc[j+1]
+
+            # Right neighbor
+            if i < N-1:
+                A[k, idx(i+1, j)] = 1
+
+            # Down neighbor
+            if j > 0:
+                A[k, idx(i, j-1)] = 1
+
+            # Up neighbor
+            if j < N-1:
+                A[k, idx(i, j+1)] = 1
+
+    # Solve linear system
+    u = spla.spsolve(A.tocsr(), b)
+
+    # Insert interior solution into full grid (with boundaries)
+    U = np.zeros((N+2, N+2))
+    U[1:-1, 1:-1] = u.reshape(N, N)
+    U[0, :] = left_bc  # left boundary condition
+    return U
+
+
+def evaluate_solution_mollified(grid, points, eps):
+    """
+    Evaluate the solution at measurement points using Gaussian mollification.
+    This mimics realistic sensors that average over a small neighborhood.
+
+    Inputs:
+        grid   : full solution grid
+        points : list of (x,y) measurement locations
+        eps    : mollifier width
+
+    Output:
+        array of mollified values at measurement points
+    """
+    N = grid.shape[0]
+    x = np.linspace(0,1,N)
+    y = np.linspace(0,1,N)
+    X, Y = np.meshgrid(x, y, indexing='ij')
+
+    vals = []
+    for x0, y0 in points:
+        w = np.exp(-((X-x0)**2 + (Y-y0)**2)/(2*eps**2))
+        w /= w.sum()  # normalize weights
+        vals.append(np.sum(w * grid))
+    return np.asarray(vals)
+# Forward map: from RBF coefficients → predicted measurements
+
+N_blackbox = 30          # grid size for PDE solver
+k = 12                   # number of RBFs
+centres = np.linspace(0.05, 0.95, k)  # RBF centers along boundary
+ell = 0.12               # RBF width
+measurement_points = list(zip(x_meas, y_meas))
+
+def forward_blackbox(alpha, eps=0.03):
+    """
+    Full forward operator:
+    alpha → solve PDE → mollified evaluations at measurement points
+    """
+    grid = solve_laplace_rbf(N_blackbox, alpha, centres, ell)
+    return evaluate_solution_mollified(grid, measurement_points, eps)
+ # Bayesian model: log-posterior = log-likelihood + log-prior
+
+tau = 1.0  # prior standard deviation (Gaussian prior)
+
+def log_posterior(alpha):
+    pred = forward_blackbox(alpha)
+    misfit = np.sum((pred - u_meas)**2) / (2*sigma**2)
+    prior = np.sum(alpha**2) / (2*tau**2)
+    return -(misfit + prior)
+# MCMC sampling using Metropolis–Hastings
+
+def run_mcmc(n_steps=4000, step_size=0.013):
+    """
+    Basic Metropolis-Hastings sampler.
+    Starts at alpha = 0 and proposes Gaussian random steps.
+    """
+    alpha = np.zeros(k)
+    lp = log_posterior(alpha)
+    samples = []
+
+    for _ in range(n_steps):
+        prop = alpha + step_size * np.random.randn(k)
+        lp_prop = log_posterior(prop)
+
+        # Accept/reject step
+        if np.log(np.random.rand()) < lp_prop - lp:
+            alpha, lp = prop, lp_prop
+
+        samples.append(alpha.copy())
+
+    return np.array(samples)
+
+# Run MCMC and discard burn-in
+samples = run_mcmc()
+burn = samples.shape[0] // 3
+samples = samples[burn:]
+# Reconstruct boundary condition from posterior samples
+
+y_plot = np.linspace(0,1,200)
+
+# Compute RBF basis matrix at plotting points
+Phi = np.exp(-0.5*((y_plot[:,None]-centres[None,:])/ell)**2)
+
+# Evaluate boundary for each MCMC sample
+f_samples = samples @ Phi.T
+
+# Posterior summary statistics
+f_mean = f_samples.mean(axis=0)
+f_low = np.percentile(f_samples, 2.5, axis=0)
+f_high = np.percentile(f_samples, 97.5, axis=0)
+
+# Plot reconstruction with credible intervals
+plt.figure()
+plt.fill_between(y_plot, f_low, f_high, alpha=0.3, label="95% credible band")
+plt.plot(y_plot, f_mean, label="Posterior mean")
+plt.scatter(f_true_y, f_true_vals, c='k', label="Reference samples")
+plt.xlabel("y")
+plt.ylabel("f(y)")
+plt.legend()
+plt.title("Reconstructed boundary condition")
+plt.show()
+# MCMC diagnostics: trace plots, autocorrelation, acceptance rate
+
+plt.figure(figsize=(12, 4))
+
+# Trace plots for selected coefficients
+plt.subplot(1, 3, 1)
+for i in [0, k//2, k-1]:
+    plt.plot(samples[:, i], alpha=0.7, label=f'α{i+1}')
+plt.xlabel('MCMC iteration')
+plt.ylabel('Parameter value')
+plt.title('Trace plots (post-burn-in)')
+plt.legend()
+plt.grid(True, alpha=0.3)
+
+# Autocorrelation function for selected coefficients
+plt.subplot(1, 3, 2)
+max_lag = 100
+for i in [0, k//2, k-1]:
+    autocorr = np.correlate(samples[:, i] - np.mean(samples[:, i]),
+                            samples[:, i] - np.mean(samples[:, i]),
+                            mode='full')[-samples.shape[0]:]
+    autocorr = autocorr[:max_lag] / autocorr[0]
+    plt.plot(autocorr, alpha=0.7, label=f'α{i+1}')
+plt.xlabel('Lag')
+plt.ylabel('Autocorrelation')
+plt.title('Autocorrelation function')
+plt.legend()
+plt.grid(True, alpha=0.3)
+
+# Acceptance rate diagnostics
+def run_mcmc_with_diagnostics(n_steps=4000, step_size=0.013):
+    """
+    Same as run_mcmc, but also records acceptance decisions.
+    """
+    alpha = np.zeros(k)
+    lp = log_posterior(alpha)
+    samples = []
+    accepts = []
+
+    for _ in range(n_steps):
+        prop = alpha + step_size * np.random.randn(k)
+        lp_prop = log_posterior(prop)
+        if np.log(np.random.rand()) < lp_prop - lp:
+            alpha, lp = prop, lp_prop
+            accepts.append(1)
+        else:
+            accepts.append(0)
+        samples.append(alpha.copy())
+
+    return np.array(samples), np.array(accepts)
+
+# Run diagnostics sampler
+samples_full, accepts = run_mcmc_with_diagnostics()
+acceptance_rate = np.mean(accepts[burn:])
+
+plt.subplot(1, 3, 3)
+window = 200
+running_accept = np.convolve(accepts, np.ones(window)/window, mode='valid')
+plt.plot(running_accept, 'b-', alpha=0.7)
+plt.axhline(y=0.234, color='r', linestyle='--', label='Optimal (0.234)')
+plt.xlabel('Iteration (smoothed)')
+plt.ylabel('Acceptance rate')
+plt.title(f'Running acceptance rate\nFinal: {acceptance_rate:.3f}')
+plt.legend()
+plt.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+# Log-posterior trace plot
+
+logpost_trace = [log_posterior(a) for a in samples]
+
+plt.figure()
+plt.plot(logpost_trace)
+plt.xlabel("MCMC iteration")
+plt.ylabel("Log-posterior")
+plt.title("MCMC log-posterior trace")
+plt.show()
+ 
